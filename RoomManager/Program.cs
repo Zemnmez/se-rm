@@ -323,43 +323,6 @@ namespace IngameScript
     
         }
 
-        IEnumerator<Step> AutoCloseDoors(int nTicks)
-        {
-            Log("== Auto door closer ==");
-            Log("Doors close after", nTicks.ToString(), "ticks.");
-            var openDoors = new Dictionary<long, int>();
-            while (true)
-            {
-                foreach (IMyDoor door in Doors())
-                {
-
-                    if (openDoors.ContainsKey(door.EntityId))
-                    {
-
-                        var entry = openDoors[door.EntityId];
-                        Log("Door", door.CustomName, "has", entry.ToString(), "ticks left.");
-                        if (entry <= 0)
-                        {
-                            Log("Closing door", door.CustomName, "after", nTicks.ToString(), "ticks.");
-                            door.CloseDoor();
-                            openDoors.Remove(door.EntityId);
-                        } else
-                        {
-                            openDoors[door.EntityId]--;
-                        }
-                        continue;
-                    }
-                    
-                    if(door.Status == DoorStatus.Open)
-                    {
-                        Log("Door", door.CustomName, "is open. Closing after", nTicks.ToString(), "ticks.");
-                        openDoors[door.EntityId] = nTicks;
-                    }
-                }
-                yield return Step.Wait(1);
-            }
-        }
-
         IEnumerator<Step> RemoveVentsThatNeverPressurize(List<IMyAirVent> vents)
         {
             Log("Removing vents that never pressurize");
