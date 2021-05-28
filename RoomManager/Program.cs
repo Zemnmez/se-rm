@@ -140,6 +140,11 @@ namespace IngameScript
 
         class Step
         {
+            public static Step Noop() {
+                var s = new Step();
+                s.noop = true;
+                return s;
+            }
             public static Step Wait(int n)
             {
                 var s = new Step();
@@ -154,6 +159,7 @@ namespace IngameScript
             }
             public int waitFor = 0;
             public IEnumerator<Step> next;
+            public bool noop = false;
         }
 
 
@@ -220,6 +226,7 @@ namespace IngameScript
                 return;
             }
 
+            try {
             // `MoveNext()` executes next part of `MyMethod()` until the next `yield ...` statement
             // But `MoveNext()` will also return `false` when `MyMethod()` has nothing more to do
             if (false == stateMachine.MoveNext())
@@ -227,12 +234,18 @@ namespace IngameScript
                 Log("Script finished.");
                 stateMachine.Dispose(); // Important to clean up!
                 stateMachine = null; // Important to clean up!
-                Runtime.UpdateFrequency = UpdateFrequency.Update100;
+                Runtime.UpdateFrequency = UpdateFrequency.None;
             }
             else
             {
                 // Take the `yield return ...`-value and store it in our 'remaining counter'
                 remainingWaitCount = stateMachine.Current;
+            }
+                }
+            catch(Exception ex)
+            {
+                Log("FATAL: ", ex.ToString());
+                throw ex;
             }
 
 
@@ -245,6 +258,7 @@ namespace IngameScript
 
         IEnumerator<int> EnumeratorUnroller(IEnumerator<Step> e)
         {
+            //Log(e.ToString());
             while (e.MoveNext())
             {
                 if (e.Current.next != null)
@@ -260,7 +274,11 @@ namespace IngameScript
                 {
                     yield return e.Current.waitFor;
                 }
-                else { throw new Exception("???"); }
+                else if (e.Current.noop)
+                {
+                    continue;
+                }
+                else { throw new Exception("Nonsensical step command issued."); }
             }
             e.Dispose();
         }
@@ -280,7 +298,8 @@ namespace IngameScript
         IEnumerator<Step> Do()
         {
             Log(" == Room Management System == ");
-            yield return Step.Next(FindRooms());
+            var state = new SearchState();
+            yield return Step.Next(LocateRooms(state));
 
         }
 
@@ -339,18 +358,173 @@ namespace IngameScript
             });
         }
 
-        IEnumerator<Step> FindRooms()
+        class Area { }
+
+        class Outside : Area { }
+
+        class Room : Area
         {
-            yield return Step.Next(TestLines());
-            Log("Finding rooms...");
+            public List<IMyDoor> PathTo;
+            public bool IsDeadEnd; 
+            public List<IMyAirVent> Vents;
+            
+            public string Name()
+            {
+                var namedRoom = Vents.Find(vent => vent.CustomName.Contains("[Room]"));
+                if (namedRoom != null) return namedRoom.CustomName;
+                return Vents.First().CustomName;
+            }
 
-            var vents = BlocksOfType<IMyAirVent>();
-            Log("Detected", vents.Count.ToString(), "vents.");
-            yield return Step.Next(RemoveVentsThatNeverPressurize(vents));
+            public bool SameAs(Room r)
+            {
+                return Vents.TrueForAll(v => r.Vents.Contains(v));
+            }
+        }
 
 
+        class SearchState
+        {
+            public List<Room> Rooms;
+            public SearchState()
+            {
+                Rooms = new List<Room>();
+            }
+
+            public IEnumerable<IMyDoor> DoorsKnownToConnectToARoom()
+            {
+                return Rooms.SelectMany(rm => rm.PathTo).Distinct();
+            }
+        }
+
+        IEnumerator<Step> OpenDoors(IEnumerable<IMyDoor> doors)
+        {
+            foreach(var door in doors)
+            {
+                door.OpenDoor();
+            }
+
+            while(doors.ToList().Exists(door => door.Status != DoorStatus.Open))
+            {
+                yield return Step.Wait(1);
+                Log("Waiting for doors to be open:", String.Join(", ", doors.Where(door => door.Status != DoorStatus.Open).Select(door => door.CustomName)));
+            }
 
         }
+
+        IEnumerator<Step> LocateRooms(SearchState state)
+        {
+            Log("Locating all rooms...");
+
+            var ventsNotInRooms = BlocksOfType<IMyAirVent>();
+            Log("Detected", ventsNotInRooms.Count.ToString(), "vents");
+
+            Log("Removing vents that never pressurize");
+            yield return Step.Next(CloseAllDoors());
+
+            Log("Vents that never pressurize cannot be in a room.");
+       
+            ventsNotInRooms.RemoveAll(v =>
+            {
+                if (!v.CanPressurize)
+                {
+                    Log("Dropped vent", v.CustomName, "because it never pressurizes.");
+                }
+                return !v.CanPressurize;
+            });
+
+            var doors = BlocksOfType<IMyDoor>();
+
+            Log("Detected", doors.Count.ToString(), "doors on ship", Me.CubeGrid.CustomName);
+
+            List<IMyDoor> uncheckedDoors = doors.Where(door => !state.DoorsKnownToConnectToARoom().Contains(door)).ToList();
+
+            Log("Locating root rooms (rooms that are exposed to outside)");
+            Log("Testing", uncheckedDoors.Count.ToString(), "doors");
+
+            var doorsToRemove = new List<IMyDoor>();
+            foreach (IMyDoor door in uncheckedDoors)
+            {
+                Log("Closing all the doors to test door", door.CustomName);
+                yield return Step.Next(CloseAllDoors());
+                yield return Step.Next(OpenDoor(door));
+
+                var roomVents = ventsNotInRooms.FindAll(v => !v.CanPressurize);
+                if (roomVents.Count < 1)
+                {
+                    Log("Opening only door", door.CustomName, "did not result in a room being depressurized.");
+                    continue;
+                }
+
+
+                Log("Opening only door", door.CustomName, "did result in a room being depressurized.");
+                Log("Opening door", door.CustomName, "revealed a room containing the set of vents:", String.Join(", ", roomVents.Select(v => v.CustomName)));
+
+                var newRoom = new Room();
+                newRoom.Vents = roomVents.ToList();
+                ventsNotInRooms = ventsNotInRooms.Except(roomVents).ToList();
+                doorsToRemove.Add(door);
+                newRoom.PathTo = new List<IMyDoor>();
+                newRoom.PathTo.Add(door);
+                newRoom.IsDeadEnd = false;
+                state.Rooms.Add(newRoom);
+
+
+                Log("Opening door", door.CustomName, "revealed root room", newRoom.Name());
+            }
+            uncheckedDoors = uncheckedDoors.Except(doorsToRemove).ToList();
+
+            Log("After finding root rooms, there are", uncheckedDoors.Count.ToString(), "doors left and", ventsNotInRooms.Count.ToString(), "vents left.");
+
+            for (; uncheckedDoors.Count > 0 && state.Rooms.Exists(rm => !rm.IsDeadEnd) && ventsNotInRooms.Count > 0; uncheckedDoors = doors.Where(door => state.DoorsKnownToConnectToARoom().ToList().Exists(d2 => d2.EntityId == door.EntityId)).ToList()) {
+                Log("Still to check: ", uncheckedDoors.Count.ToString(), "doors.");
+
+                var newRooms = new List<Room>();
+                foreach(var room in state.Rooms.Where(rm => !rm.IsDeadEnd))
+                {
+                    var doorsThatNowHaveRooms = new List<IMyDoor>();
+                    foreach (var door in uncheckedDoors)
+                    {
+                        Log("Closing all doors to check room", room.Name(), "with door", door.CustomName);
+                        yield return Step.Next(CloseAllDoors());
+                        Log("Opening all doors to", room.Name());
+                        yield return Step.Next(OpenDoors(room.PathTo));
+                        Log("Opening door", door.CustomName, "to see if it reveals a room...");
+                        yield return Step.Next(OpenDoor(door));
+
+                        var roomVents = ventsNotInRooms.FindAll(vent => !vent.CanPressurize);
+
+                        if (roomVents.Count == 0)
+                        {
+                            Log("Opening door", door.CustomName, "did not find a room.");
+                            continue;
+                        }
+
+                        Log("Opening door", door.CustomName, "did result in a room being depressurized.");
+                        Log("Opening door", door.CustomName, "revealed a room containing the set of vents:", String.Join(", ", roomVents.Select(v => v.ToString())));
+
+                        var newRoom = new Room();
+                        newRoom.Vents = roomVents.ToList();
+                        ventsNotInRooms = ventsNotInRooms.Except(roomVents).ToList();
+                        doorsThatNowHaveRooms.Add(door);
+                        newRoom.PathTo = new List<IMyDoor>();
+                        newRoom.PathTo.Add(door);
+                        newRoom.IsDeadEnd = false;
+                        newRooms.Add(newRoom);
+                    }
+                    uncheckedDoors = uncheckedDoors.Except(doorsThatNowHaveRooms).ToList();
+
+                    // all doors were checked. room is a dead end.
+                    room.IsDeadEnd = true;
+                }
+                newRooms.ForEach(rm => state.Rooms.Add(rm));
+
+
+            }
+
+            Log("Search complete. There are", state.Rooms.Count.ToString(), "rooms, as follows:");
+            state.Rooms.ForEach(room => Log(room.Name()));
+        }
+
 
 
 
