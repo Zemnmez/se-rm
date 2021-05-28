@@ -43,7 +43,7 @@ namespace IngameScript
         //
         // to learn more about ingame scripts.
 
-        float FontSize = .5F;
+        float FontSize = .4F;
 
         public Program()
         {
@@ -58,7 +58,7 @@ namespace IngameScript
             // here, which will allow your script to run itself without a 
             // timer block.
             Clear();
-            Screen().FontSize = FontSize;
+            TextScreen().FontSize = FontSize;
             Runtime.UpdateFrequency = UpdateFrequency.Update1;
         }
 
@@ -75,28 +75,33 @@ namespace IngameScript
         List<string> TextLines = new List<string>();
         StringBuilder letterM = new StringBuilder("M");
 
-        private IMyTextSurface Screen()
+        private IMyTextSurface VisualDisplay()
+        {
+            return Me.GetSurface(1);
+        }
+
+        private IMyTextSurface TextScreen()
         {
             return Me.GetSurface(0);
         }
 
         private int NumLines()
         {
-            var screenSize = Screen().SurfaceSize;
+            var screenSize = TextScreen().SurfaceSize;
 
-            var MLetterSize = Screen().MeasureStringInPixels(letterM, Screen().Font, FontSize);
+            var MLetterSize = TextScreen().MeasureStringInPixels(letterM, TextScreen().Font, FontSize);
             return (int)((screenSize.X / 2) / MLetterSize.X) - 4;
         }
 
         private void Clear()
         {
-            Screen().WriteText("", false);
+            TextScreen().WriteText("", false);
         }
 
         private void Write(string what)
         {
-            Screen().WriteText(what);
-            Screen().ContentType = ContentType.TEXT_AND_IMAGE;
+            TextScreen().WriteText(what);
+            TextScreen().ContentType = ContentType.TEXT_AND_IMAGE;
         }
 
         private void Println(params string[] what)
@@ -220,12 +225,7 @@ namespace IngameScript
             remainingWaitCount -= 1;
 
             // When 'remaining counter' has reached zero (or below), then we are ready to continue the next part of `MyMethod()`
-            if (!(remainingWaitCount <= 0))
-            {
-
-                return;
-            }
-
+            if (!(remainingWaitCount <= 0)) { return; } 
             try {
             // `MoveNext()` executes next part of `MyMethod()` until the next `yield ...` statement
             // But `MoveNext()` will also return `false` when `MyMethod()` has nothing more to do
@@ -247,9 +247,6 @@ namespace IngameScript
                 Log("FATAL: ", ex.ToString());
                 throw ex;
             }
-
-
-
         }
 
         int remainingWaitCount;
@@ -258,7 +255,6 @@ namespace IngameScript
 
         IEnumerator<int> EnumeratorUnroller(IEnumerator<Step> e)
         {
-            //Log(e.ToString());
             while (e.MoveNext())
             {
                 if (e.Current.next != null)
@@ -299,23 +295,15 @@ namespace IngameScript
         {
             Log(" == Room Management System == ");
             var state = new SearchState();
+            yield return Step.Next(DrawTest());
             yield return Step.Next(LocateRooms(state));
+
 
         }
 
         IEnumerator<Step> CloseAllDoors()
         {
-            Log("Closing all doors...");
-            Doors().ForEach(door => door.CloseDoor());
-            Log("Waiting for doors to be closed...");
-            while (Doors().Exists(v => v.Status != DoorStatus.Closed))
-            {
-                var openDoors = Doors().Where(d => d.Status == DoorStatus.Opening);
-                foreach (IMyDoor door in openDoors) { door.CloseDoor();  Log("Still waiting for", door.CustomName); }
-                
-                yield return Step.Wait(1);
-            }
-            Log("All doors closed.");
+            yield return Step.Next(CloseDoors(Doors()));
         }
 
         IEnumerator<Step> OpenDoor(IMyDoor door)
@@ -329,34 +317,6 @@ namespace IngameScript
             Log("Door", door.CustomName, "is now open");
         }
 
-        IEnumerator<Step> TestLines()
-        {
-            int end = NumLines();
-            Log("Detected", NumLines().ToString(), "rows:");
-            for (int i = 0; i < end; i++)
-            {
-                Log("row:", i.ToString());
-                yield return Step.Wait(1);
-            }
-            Log("Row calibration complete.");
-    
-        }
-
-        IEnumerator<Step> RemoveVentsThatNeverPressurize(List<IMyAirVent> vents)
-        {
-            Log("Removing vents that never pressurize");
-            yield return Step.Next(CloseAllDoors());
-
-       
-            vents.RemoveAll(v =>
-            {
-                if (!v.CanPressurize)
-                {
-                    Log("Dropped vent", v.CustomName, "because it never pressurizes.");
-                }
-                return !v.CanPressurize;
-            });
-        }
 
         class Area { }
 
@@ -370,9 +330,17 @@ namespace IngameScript
             
             public string Name()
             {
-                var namedRoom = Vents.Find(vent => vent.CustomName.Contains("[Room]"));
-                if (namedRoom != null) return namedRoom.CustomName;
-                return Vents.First().CustomName;
+                var namedRoom = Vents.Find(vent => vent.CustomName.ToLower().Contains("[room]"));
+                if (namedRoom == null) return Vents.First().CustomName;
+                var name = namedRoom.CustomName;
+                while (true)
+                {
+                    var lbrPos = name.IndexOf("[");
+                    var rbrPos = name.IndexOf("]");
+                    if (lbrPos == -1 || rbrPos == -1 || rbrPos < lbrPos) break;
+                    name = name.Substring(0, lbrPos) + name.Substring(rbrPos+1);
+                }
+                return name.Trim();
             }
 
             public bool SameAs(Room r)
@@ -395,7 +363,6 @@ namespace IngameScript
                 return Rooms.SelectMany(rm => rm.PathTo).Distinct();
             }
         }
-
         IEnumerator<Step> OpenDoors(IEnumerable<IMyDoor> doors)
         {
             foreach(var door in doors)
@@ -403,12 +370,50 @@ namespace IngameScript
                 door.OpenDoor();
             }
 
+
+            var i = 0;
             while(doors.ToList().Exists(door => door.Status != DoorStatus.Open))
             {
+                if (i > 10)
+                {
+                    Log("Waiting for doors to be open:", String.Join(", ", doors.Where(door => door.Status != DoorStatus.Open).Select(door => door.CustomName)));
+                }
+                i++;
                 yield return Step.Wait(1);
-                Log("Waiting for doors to be open:", String.Join(", ", doors.Where(door => door.Status != DoorStatus.Open).Select(door => door.CustomName)));
+            }
+        }
+
+        IEnumerator<Step> CloseDoors(IEnumerable<IMyDoor> doors)
+        {
+            foreach(var door in doors)
+            {
+                door.CloseDoor();
             }
 
+            var i = 0;
+            while(doors.ToList().Exists(door => door.Status != DoorStatus.Closed))
+            {
+                if (i > 10)
+                {
+                    Log("Waiting for doors to be open:", String.Join(", ", doors.Where(door => door.Status != DoorStatus.Closed).Select(door => door.CustomName)));
+                }
+
+                i++;
+                yield return Step.Wait(1);
+            }
+        }
+
+
+        IEnumerator<Step> DrawTest()
+        {
+            VisualDisplay().ContentType = ContentType.SCRIPT;
+            yield return Step.Wait(1);
+            Log("Detected", Me.SurfaceCount.ToString(), "Surfaces");
+            var surf = VisualDisplay();
+            var frame = surf.DrawFrame();
+            MySprite icon = new MySprite(SpriteType.TEXTURE, "Arrow", size: new Vector2(50f, 50f), color: new Color(255, 255, 255));
+            icon.Position = surf.TextureSize / 2f + (new Vector2(50f) / 2f);
+            frame.Add(icon);
         }
 
         IEnumerator<Step> LocateRooms(SearchState state)
@@ -468,10 +473,15 @@ namespace IngameScript
                 newRoom.IsDeadEnd = false;
                 state.Rooms.Add(newRoom);
 
+                door.CustomName = "Door to " + newRoom.Name();
+
 
                 Log("Opening door", door.CustomName, "revealed root room", newRoom.Name());
             }
-            uncheckedDoors = uncheckedDoors.Except(doorsToRemove).ToList();
+
+            uncheckedDoors.RemoveAll(d =>
+                doorsToRemove.Exists(d2 => d.EntityId == d2.EntityId)
+            );
 
             Log("After finding root rooms, there are", uncheckedDoors.Count.ToString(), "doors left and", ventsNotInRooms.Count.ToString(), "vents left.");
 
@@ -510,8 +520,13 @@ namespace IngameScript
                         newRoom.PathTo.Add(door);
                         newRoom.IsDeadEnd = false;
                         newRooms.Add(newRoom);
+                        door.CustomName = "Door to " + newRoom.Name();
                     }
-                    uncheckedDoors = uncheckedDoors.Except(doorsThatNowHaveRooms).ToList();
+
+                    uncheckedDoors.RemoveAll(d =>
+                        doorsThatNowHaveRooms.Exists(d2 => d.EntityId == d2.EntityId)
+                    );
+
 
                     // all doors were checked. room is a dead end.
                     room.IsDeadEnd = true;
@@ -524,9 +539,6 @@ namespace IngameScript
             Log("Search complete. There are", state.Rooms.Count.ToString(), "rooms, as follows:");
             state.Rooms.ForEach(room => Log(room.Name()));
         }
-
-
-
 
     }
 }
